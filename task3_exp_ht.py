@@ -2,25 +2,21 @@ import sklearn_crfsuite
 from sklearn_crfsuite import metrics
 from datasets import load_dataset
 import re
-import scipy.stats  # <--- FIXED: Added missing import
+import scipy.stats
 from sklearn.metrics import make_scorer
 from sklearn.model_selection import RandomizedSearchCV
 
-# 1. Load dataset
 dataset = load_dataset("eriktks/conll2003", trust_remote_code=True)
 train_data = dataset['train']
 test_data = dataset['test']
 val_data = dataset['validation']
 
-# 2. Define Helper for Word Shapes (Advanced Feature)
 def get_word_shape(word):
-    # Map characters to a simplified shape (e.g., Apple -> Xxxxx, CRF-2024 -> XXX-dddd)
     shape = re.sub(r'[A-Z]', 'X', word)
     shape = re.sub(r'[a-z]', 'x', shape)
     shape = re.sub(r'[0-9]', 'd', shape)
     return shape
 
-# 3. Define Advanced Feature Extractor
 def word2features(sent_tokens, sent_pos, i):
     word = sent_tokens[i]
     postag = str(sent_pos[i])
@@ -28,7 +24,7 @@ def word2features(sent_tokens, sent_pos, i):
     features = {
         'bias': 1.0,
         'word.lower()': word.lower(),
-        'word.shape': get_word_shape(word), # <--- ADDED: Word Shape
+        'word.shape': get_word_shape(word),
         'postag': postag,
         'is_first': i == 0,
         'is_last': i == len(sent_tokens) - 1,
@@ -40,18 +36,12 @@ def word2features(sent_tokens, sent_pos, i):
         'capitals_inside': any(c.isupper() for c in word[1:]) if len(word) > 1 else False,
     }
     
-    # Logic for Abbreviations (U.S., O.J.)
     features['is_abbreviation'] = bool(re.match(r'^([A-Z]\.)+$', word))
 
-    # Character N-Grams (Lengths 2 to 4 for broader coverage)
     for n in range(2, 5):
         if len(word) >= n:
             features[f'prefix-{n}'] = word[:n]
             features[f'suffix-{n}'] = word[-n:]
-
-    # --- ADVANCED CONTEXTUAL WINDOWS (±2) ---
-    
-    # i-1 (Previous Word)
     if i > 0:
         word1 = sent_tokens[i-1]
         postag1 = str(sent_pos[i-1])
@@ -64,14 +54,12 @@ def word2features(sent_tokens, sent_pos, i):
     else:
         features['BOS'] = True
 
-    # i-2 (Two words back)
     if i > 1:
         features.update({
             '-2:word.lower()': sent_tokens[i-2].lower(),
             '-2:postag': str(sent_pos[i-2]),
         })
 
-    # i+1 (Next Word)
     if i < len(sent_tokens) - 1:
         word1 = sent_tokens[i+1]
         postag1 = str(sent_pos[i+1])
@@ -79,9 +67,8 @@ def word2features(sent_tokens, sent_pos, i):
             '+1:word.lower()': word1.lower(),
             '+1:word.shape': get_word_shape(word1),
             '+1:postag': postag1,
-            'word_bigram_next': f"{word.lower()}_{word1.lower()}", # <--- ADDED: Bigram
+            'word_bigram_next': f"{word.lower()}_{word1.lower()}",
         })
-        # Conjunction Sandwich Logic (Bank [of] America)
         if word.lower() in ['of', 'and'] and i > 0:
             prev_w = sent_tokens[i-1]
             if prev_w[0].isupper() and word1[0].isupper():
@@ -89,7 +76,6 @@ def word2features(sent_tokens, sent_pos, i):
     else:
         features['EOS'] = True
 
-    # i+2 (Two words ahead)
     if i < len(sent_tokens) - 2:
         features.update({
             '+2:word.lower()': sent_tokens[i+2].lower(),
@@ -105,7 +91,6 @@ def sent2features(sentence_row):
 def sent2labels(sent_tags):
     return [str(tag) for tag in sent_tags]
 
-# 4. Process Data
 print("Extracting features...")
 X_train = [sent2features(row) for row in train_data]
 y_train = [sent2labels(row['ner_tags']) for row in train_data]
@@ -113,8 +98,6 @@ y_train = [sent2labels(row['ner_tags']) for row in train_data]
 X_test = [sent2features(row) for row in test_data]
 y_test = [sent2labels(row['ner_tags']) for row in test_data]
 
-# 5. Initialize Model and Search
-# We do NOT call crf.fit() here yet. We let the search do it.
 crf = sklearn_crfsuite.CRF(
     algorithm='lbfgs',
     max_iterations=100,
@@ -126,7 +109,6 @@ params_space = {
     'c2': scipy.stats.expon(scale=0.05),
 }
 
-# 6. Setup Scoring (Exclude '0' tag to focus on entities)
 labels = list(set(tag for sent in y_train for tag in sent))
 if '0' in labels: labels.remove('0')
 
@@ -134,11 +116,9 @@ f1_scorer = make_scorer(metrics.flat_f1_score,
                         average='weighted', 
                         labels=labels)
 
-# 7. Run Randomized Search
-# Note: n_iter=20 is used to keep run time reasonable. Increase to 50 for better results.
-print("Starting Hyperparameter Search (this may take a while)...")
+
 rs = RandomizedSearchCV(
-    crf,          # <--- FIXED: Passed the correct variable name
+    crf,
     params_space, 
     cv=3, 
     verbose=1, 
@@ -149,11 +129,9 @@ rs = RandomizedSearchCV(
 
 rs.fit(X_train, y_train)
 
-# 8. Output Best Results
 print('Best params:', rs.best_params_)
 print('Best F1-score:', rs.best_score_)
 
-# 9. Evaluate Best Model
 crf_best = rs.best_estimator_
 y_pred = crf_best.predict(X_test)
 
@@ -168,5 +146,25 @@ def print_top_features(crf_model, top_n=15):
     for name, weight in sorted_features[:top_n]:
         print(f"{str(name):<40} | {weight:0.4f}")
 
+
 print("Top features for the Best Model:")
-print_top_features(crf_best) # <--- FIXED: Passing the best model, not the base one
+print_top_features(crf_best, top_n=20)
+accuracy = metrics.flat_accuracy_score(y_test, y_pred)
+print(f"\nToken-level Accuracy: {accuracy:.4f}")
+
+#accuracy for entity tokens
+
+y_test_flat = [tag for sent in y_test for tag in sent]
+y_pred_flat = [tag for sent in y_pred for tag in sent]
+
+
+correct_entities = 0
+total_entities = 0
+for true, pred in zip(y_test_flat, y_pred_flat):
+    if true != '0':  
+        total_entities += 1
+        if true == pred:
+            correct_entities += 1
+
+entity_accuracy = correct_entities / total_entities if total_entities > 0 else 0
+print(f"Entity-only Accuracy: {entity_accuracy:.4f}")
